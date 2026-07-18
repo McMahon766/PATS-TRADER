@@ -3,10 +3,14 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  let signal = req.body || {};
+  let signal;
+  try {
+    signal = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+  } catch (e) {
+    signal = {};
+  }
 
-  // Log what n8n is sending
-  console.log("Received signal:", JSON.stringify(signal));
+  console.log("Received:", JSON.stringify(signal));
 
   const required = ['TYPE', 'ENTRY', 'SL', 'TP', 'lots', 'uniqueID'];
   for (const f of required) {
@@ -15,12 +19,12 @@ export default async function handler(req, res) {
     }
   }
 
-  const APP_ID    = process.env.APP_ID;
-  const TOKEN     = process.env.TOKEN;
+  const APP_ID = process.env.APP_ID;
+  const TOKEN = process.env.TOKEN;
   const MT5_LOGIN = process.env.MT5_LOGIN;
 
   if (!APP_ID || !TOKEN || !MT5_LOGIN) {
-    return res.status(500).json({ error: "Server credentials not configured" });
+    return res.status(500).json({ error: "Credentials not set" });
   }
 
   try {
@@ -28,34 +32,26 @@ export default async function handler(req, res) {
       const WebSocket = require('ws');
       const ws = new WebSocket(`wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`);
 
-      let step = 'auth';
-
-      const send = (obj) => ws.send(JSON.stringify(obj));
-
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(new Error('Deriv connection timed out'));
-      }, 15000);
+      const timeout = setTimeout(() => reject(new Error('Timeout')), 15000);
 
       ws.on('open', () => {
-        console.log("WebSocket connected, authorizing...");
-        send({ authorize: TOKEN });
+        console.log("✅ Connected - Sending authorize");
+        ws.send(JSON.stringify({ authorize: TOKEN }));
       });
 
       ws.on('message', (data) => {
         const msg = JSON.parse(data);
-        console.log("Received from Deriv:", msg.msg_type);
+        console.log("Deriv msg:", msg.msg_type || msg);
 
         if (msg.error) {
           clearTimeout(timeout);
           ws.close();
-          return reject(new Error(`Deriv Error [${step}]: ${msg.error.message || JSON.stringify(msg.error)}`));
+          reject(new Error(`Deriv: ${msg.error.message || JSON.stringify(msg.error)}`));
         }
 
-        if (step === 'auth' && msg.msg_type === 'authorize') {
-          step = 'trade';
-          console.log("Authorized. Sending trade order...");
-          send({
+        if (msg.msg_type === 'authorize') {
+          console.log("✅ Authorized - Sending order");
+          ws.send(JSON.stringify({
             mt5_new_order: 1,
             login: MT5_LOGIN,
             symbol: 'XAUUSD',
@@ -67,35 +63,28 @@ export default async function handler(req, res) {
             type_filling: 0,
             type_time: 0,
             comment: `PATS-${signal.uniqueID}`
-          });
+          }));
         }
 
-        if (step === 'trade' && msg.msg_type === 'mt5_new_order') {
+        if (msg.msg_type === 'mt5_new_order') {
           clearTimeout(timeout);
           ws.close();
-          resolve({
-            success: true,
-            order_id: msg.mt5_new_order?.order,
-            ...signal,
-            timestamp: new Date().toISOString()
-          });
+          resolve({ success: true, order: msg.mt5_new_order, signal });
         }
       });
 
       ws.on('error', (err) => {
-        console.error("WebSocket error:", err);
-        clearTimeout(timeout);
-        reject(new Error('WebSocket connection failed'));
+        console.error("WebSocket Error:", err.message || err);
+        reject(new Error(`WebSocket Error: ${err.message || 'Unknown'}`));
       });
+
+      ws.on('close', () => console.log("WebSocket closed"));
     });
 
-    return res.status(200).json(result);
+    return res.json(result);
 
   } catch (err) {
     console.error("Final Error:", err.message);
-    return res.status(500).json({ 
-      success: false, 
-      error: err.message 
-    });
+    return res.status(500).json({ success: false, error: err.message });
   }
 }
