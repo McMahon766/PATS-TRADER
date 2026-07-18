@@ -3,7 +3,10 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  let signal = req.body;
+  let signal = req.body || {};
+
+  // Log what n8n is sending
+  console.log("Received signal:", JSON.stringify(signal));
 
   const required = ['TYPE', 'ENTRY', 'SL', 'TP', 'lots', 'uniqueID'];
   for (const f of required) {
@@ -12,7 +15,6 @@ export default async function handler(req, res) {
     }
   }
 
-  // Credentials from Vercel Environment Variables
   const APP_ID    = process.env.APP_ID;
   const TOKEN     = process.env.TOKEN;
   const MT5_LOGIN = process.env.MT5_LOGIN;
@@ -35,28 +37,33 @@ export default async function handler(req, res) {
         reject(new Error('Deriv connection timed out'));
       }, 15000);
 
-      ws.on('open', () => send({ authorize: TOKEN }));
+      ws.on('open', () => {
+        console.log("WebSocket connected, authorizing...");
+        send({ authorize: TOKEN });
+      });
 
       ws.on('message', (data) => {
         const msg = JSON.parse(data);
+        console.log("Received from Deriv:", msg.msg_type);
 
         if (msg.error) {
           clearTimeout(timeout);
           ws.close();
-          return reject(new Error(`Deriv [${step}]: ${msg.error.message}`));
+          return reject(new Error(`Deriv Error [${step}]: ${msg.error.message || JSON.stringify(msg.error)}`));
         }
 
         if (step === 'auth' && msg.msg_type === 'authorize') {
           step = 'trade';
+          console.log("Authorized. Sending trade order...");
           send({
             mt5_new_order: 1,
             login: MT5_LOGIN,
             symbol: 'XAUUSD',
-            volume: signal.lots,
+            volume: parseFloat(signal.lots),
             type: signal.TYPE === 'BUY' ? 0 : 1,
-            price: signal.ENTRY,
-            sl: signal.SL,
-            tp: signal.TP,
+            price: parseFloat(signal.ENTRY),
+            sl: parseFloat(signal.SL),
+            tp: parseFloat(signal.TP),
             type_filling: 0,
             type_time: 0,
             comment: `PATS-${signal.uniqueID}`
@@ -69,18 +76,14 @@ export default async function handler(req, res) {
           resolve({
             success: true,
             order_id: msg.mt5_new_order?.order,
-            type: signal.TYPE,
-            lots: signal.lots,
-            entry: signal.ENTRY,
-            sl: signal.SL,
-            tp: signal.TP,
-            uniqueID: signal.uniqueID,
+            ...signal,
             timestamp: new Date().toISOString()
           });
         }
       });
 
-      ws.on('error', () => {
+      ws.on('error', (err) => {
+        console.error("WebSocket error:", err);
         clearTimeout(timeout);
         reject(new Error('WebSocket connection failed'));
       });
@@ -89,7 +92,10 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: err.message });
+    console.error("Final Error:", err.message);
+    return res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
   }
 }
